@@ -15,7 +15,6 @@
  */
 package com.gh4a.fragment;
 
-import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.text.format.DateFormat;
@@ -42,10 +41,12 @@ import com.gh4a.utils.ApiHelpers;
 import com.gh4a.utils.AvatarHandler;
 import com.gh4a.utils.RxUtils;
 import com.gh4a.utils.StringUtils;
+import com.gh4a.widget.OverviewRow;
 import com.meisolsson.githubsdk.model.Page;
 import com.meisolsson.githubsdk.model.Repository;
 import com.meisolsson.githubsdk.model.User;
 import com.meisolsson.githubsdk.model.UserType;
+import com.meisolsson.githubsdk.service.organizations.OrganizationMemberService;
 import com.meisolsson.githubsdk.service.organizations.OrganizationService;
 import com.meisolsson.githubsdk.service.repositories.RepositoryService;
 import com.meisolsson.githubsdk.service.users.UserFollowerService;
@@ -75,6 +76,7 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
     private static final int ID_LOADER_REPO_LIST = 1;
     private static final int ID_LOADER_ORG_LIST = 2;
     private static final int ID_LOADER_IS_FOLLOWING = 3;
+    private static final int ID_LOADER_ORG_MEMBER_COUNT = 4;
 
     private String mUserLogin;
     private User mUser;
@@ -83,6 +85,7 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
     private boolean mIsSelf;
 
     private Disposable mOrgListSubscription;
+    private Disposable mOrgMemberCountSubscription;
     private Disposable mIsFollowingSubscription;
     private Disposable mTopRepoSubscription;
 
@@ -120,6 +123,10 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
         if (mOrgListSubscription != null) {
             mOrgListSubscription.dispose();
             mOrgListSubscription = null;
+        }
+        if (mOrgMemberCountSubscription != null) {
+            mOrgMemberCountSubscription.dispose();
+            mOrgMemberCountSubscription = null;
         }
         getActivity().invalidateOptionsMenu();
     }
@@ -180,37 +187,51 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
         ImageView gravatar = mContentView.findViewById(R.id.iv_gravatar);
         AvatarHandler.assignAvatar(gravatar, mUser);
 
-        TextView tvFollowersCount = mContentView.findViewById(R.id.tv_followers_count);
-        tvFollowersCount.setText(String.valueOf(mUser.followers()));
-
-        View llOrgMembers = mContentView.findViewById(R.id.cell_org_members);
-        View llFollowers = mContentView.findViewById(R.id.cell_followers);
-
-        if (mUser.type() == UserType.User) {
-            llFollowers.setOnClickListener(this);
-            llOrgMembers.setVisibility(View.GONE);
+        OverviewRow joinDateRow = mContentView.findViewById(R.id.join_date_row);
+        if (mUser.createdAt() != null) {
+            joinDateRow.setText(getString(R.string.user_created_at,
+                    DateFormat.getMediumDateFormat(getActivity()).format(mUser.createdAt())));
+            joinDateRow.setVisibility(View.VISIBLE);
         } else {
-            llOrgMembers.setOnClickListener(this);
-            llFollowers.setVisibility(View.GONE);
+            joinDateRow.setVisibility(View.GONE);
         }
 
-        mContentView.findViewById(R.id.cell_repos).setOnClickListener(this);
+        boolean isUser = mUser.type() == UserType.User;
 
-        TextView tvReposCount = mContentView.findViewById(R.id.tv_repos_count);
-        final int gistCount;
-        if (mIsSelf) {
-            tvReposCount.setText(String.valueOf(mUser.totalPrivateRepos() + mUser.publicRepos()));
-            gistCount = mUser.publicGists() + mUser.privateGists();
-        } else {
-            tvReposCount.setText(String.valueOf(mUser.publicRepos()));
-            gistCount = mUser.publicGists();
+        OverviewRow membersRow = mContentView.findViewById(R.id.members_row);
+        membersRow.setVisibility(isUser ? View.GONE : View.VISIBLE);
+        if (!isUser) {
+            membersRow.setClickIntent(OrganizationMemberListActivity.makeIntent(getActivity(), mUserLogin));
+            loadOrganizationMemberCount(forceLoad);
         }
 
-        //hide gists repos if organization
+        OverviewRow followersRow = mContentView.findViewById(R.id.followers_row);
+        OverviewRow followingRow = mContentView.findViewById(R.id.following_row);
+        followersRow.setVisibility(isUser ? View.VISIBLE : View.GONE);
+        followingRow.setVisibility(isUser ? View.VISIBLE : View.GONE);
+        if (isUser) {
+            followersRow.setText(getResources().getQuantityString(R.plurals.follower,
+                    mUser.followers(), mUser.followers()));
+            followersRow.setClickIntent(
+                    FollowerFollowingListActivity.makeIntent(getActivity(), mUserLogin, true));
+            followingRow.setText(getResources().getQuantityString(R.plurals.following,
+                    mUser.following(), mUser.following()));
+            followingRow.setClickIntent(
+                    FollowerFollowingListActivity.makeIntent(getActivity(), mUserLogin, false));
+        }
 
-        fillCountIfUser(R.id.cell_gists, R.id.tv_gists_count, gistCount);
-        //hide following if organization
-        fillCountIfUser(R.id.cell_following, R.id.tv_following_count, mUser.following());
+        OverviewRow gistsRow = mContentView.findViewById(R.id.gists_row);
+        gistsRow.setVisibility(isUser ? View.VISIBLE : View.GONE);
+        if (isUser) {
+            int totalCount = orZero(mUser.publicGists()) + orZero(mUser.privateGists());
+            gistsRow.setText(getResources().getQuantityString(R.plurals.gist, totalCount, totalCount));
+            gistsRow.setClickIntent(GistListActivity.makeIntent(getActivity(), mUserLogin));
+        }
+
+        OverviewRow reposRow = mContentView.findViewById(R.id.repos_row);
+        int repoCount = orZero(mUser.totalPrivateRepos()) + orZero(mUser.publicRepos());
+        reposRow.setText(getResources().getQuantityString(R.plurals.repository, repoCount, repoCount));
+        reposRow.setClickIntent(RepositoryListActivity.makeIntent(getActivity(), mUserLogin, !isUser));
 
         TextView tvName = mContentView.findViewById(R.id.tv_name);
         String name = StringUtils.isBlank(mUser.name()) ? mUser.login() : mUser.name();
@@ -220,37 +241,21 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
             tvName.setText(name);
         }
 
-        TextView tvCreated = mContentView.findViewById(R.id.tv_created_at);
-        if (mUser.createdAt() != null) {
-            tvCreated.setText(getString(R.string.user_created_at,
-                    DateFormat.getMediumDateFormat(getActivity()).format(mUser.createdAt())));
-            tvCreated.setVisibility(View.VISIBLE);
-        } else {
-            tvCreated.setVisibility(View.GONE);
-        }
-
         fillTextView(R.id.tv_email, mUser.email());
         fillTextView(R.id.tv_website, mUser.blog());
         fillTextView(R.id.tv_company, mUser.company());
         fillTextView(R.id.tv_location, mUser.location());
 
         loadTopRepositories(forceLoad);
-        if (mUser.type() == UserType.User) {
+        if (isUser) {
             loadOrganizations(forceLoad);
         } else {
             fillOrganizations(null);
         }
     }
 
-    private void fillCountIfUser(int layoutId, int countId, int count) {
-        View layout = mContentView.findViewById(layoutId);
-        if (mUser.type() == UserType.User) {
-            TextView countView = mContentView.findViewById(countId);
-            countView.setText(String.valueOf(count));
-            layout.setOnClickListener(this);
-        } else {
-            layout.setVisibility(View.GONE);
-        }
+    private static int orZero(Integer count) {
+        return count != null ? count : 0;
     }
 
     private void fillTextView(int id, String text) {
@@ -268,21 +273,9 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
         int id = view.getId();
         Intent intent = null;
 
-        if (id == R.id.cell_followers) {
-            if (mUser.type() == UserType.Organization) {
-                intent = OrganizationMemberListActivity.makeIntent(getActivity(), mUserLogin);
-            } else {
-                intent = FollowerFollowingListActivity.makeIntent(getActivity(), mUserLogin, true);
-            }
-        } else if (id == R.id.cell_following) {
-            intent = FollowerFollowingListActivity.makeIntent(getActivity(), mUserLogin, false);
-        } else if (id == R.id.cell_repos || id == R.id.btn_repos) {
+        if (id == R.id.btn_repos) {
             intent = RepositoryListActivity.makeIntent(getActivity(), mUserLogin,
                     mUser.type() == UserType.Organization);
-        } else if (id == R.id.cell_gists) {
-            intent = GistListActivity.makeIntent(getActivity(), mUserLogin);
-        } else if (id == R.id.cell_org_members) {
-            intent = OrganizationMemberListActivity.makeIntent(getActivity(), mUserLogin);
         } else if (view.getTag() instanceof Repository) {
             intent = RepositoryActivity.makeIntent(getActivity(), (Repository) view.getTag());
         } else if (view.getTag() instanceof User) {
@@ -374,8 +367,9 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
         mUser = mUser.toBuilder()
                 .followers(mUser.followers() + (mIsFollowing ? 1 : -1))
                 .build();
-        TextView tvFollowersCount = mContentView.findViewById(R.id.tv_followers_count);
-        tvFollowersCount.setText(String.valueOf(mUser.followers()));
+        OverviewRow followersRow = mContentView.findViewById(R.id.followers_row);
+        followersRow.setText(getResources().getQuantityString(R.plurals.follower,
+                mUser.followers(), mUser.followers()));
     }
 
     private void toggleFollowingState() {
@@ -441,6 +435,19 @@ public class UserFragment extends LoadingFragmentBase implements View.OnClickLis
                 )
                 .compose(makeLoaderSingle(ID_LOADER_ORG_LIST, force))
                 .subscribe(this::fillOrganizations, this::handleLoadFailure);
+    }
+
+    private void loadOrganizationMemberCount(boolean force) {
+        final OrganizationMemberService service =
+                ServiceFactory.get(OrganizationMemberService.class, force);
+        mOrgMemberCountSubscription = ApiHelpers.PageIterator
+                .toSingle(page -> service.getMembers(mUserLogin, page))
+                .map(memberList -> memberList.size())
+                .compose(makeLoaderSingle(ID_LOADER_ORG_MEMBER_COUNT, force))
+                .subscribe(count -> {
+                    OverviewRow membersRow = mContentView.findViewById(R.id.members_row);
+                    membersRow.setText(getResources().getQuantityString(R.plurals.member, count, count));
+                }, this::handleLoadFailure);
     }
 
     private void loadIsFollowingState(boolean force) {
